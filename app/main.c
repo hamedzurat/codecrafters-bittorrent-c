@@ -55,7 +55,7 @@ char* decode_bencode(const char* bencoded_value) {
 
         strcpy(decoded_str, "[");
 
-        while(bencoded_value[index] != 'e') {
+        while(bencoded_value[index] != 'e' && index <= strlen(bencoded_value)) {
             char* decoded_part_str = decode_bencode(bencoded_value + index);
             int size               = strlen(decoded_part_str);
 
@@ -67,8 +67,11 @@ char* decode_bencode(const char* bencoded_value) {
                     actual_size /= 10;
                     index++;
                 }
-            } else if(is_digit(decoded_part_str[0]) || decoded_part_str[0] == 'l')
+            } else if(is_digit(decoded_part_str[0])) {
                 index += size + 2;
+            } else if(decoded_part_str[0] == '[') {
+                index += size + 2;
+            }
 
             strcat(decoded_str, decoded_part_str);
             strcat(decoded_str, ",");
@@ -76,7 +79,11 @@ char* decode_bencode(const char* bencoded_value) {
             free(decoded_part_str);
         }
 
-        decoded_str[strlen(decoded_str) - 1] = ']';  // replace last , with ]
+        if(decoded_str[strlen(decoded_str) - 1] == ',') {
+            decoded_str[strlen(decoded_str) - 1] = ']';  // replace last , with ]
+        } else {
+            strcat(decoded_str, "]");
+        }
 
         return decoded_str;
     } else {
