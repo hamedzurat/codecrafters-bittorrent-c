@@ -23,10 +23,27 @@ char* decode_bencode(const char* bencoded_value) {
             fprintf(stderr, "Invalid encoded value: %s\n", bencoded_value);
             exit(1);
         }
+    } else if(bencoded_value[0] == 'i') {
+        int i = 1;                         // to skip i
+        if(bencoded_value[1] == '-') i++;  // for negative number
+
+        for(; bencoded_value[i] != '\0'; i++) {
+            if(!is_digit(bencoded_value[i]) && bencoded_value[i] == 'e') {  // check if there is a 'e' or not and only 'e' not anyother later
+                i--;                                                        // discard bc 'i' and 'e' will count 2 extra
+
+                char* decoded_str = (char*)malloc(i);
+                strncpy(decoded_str, bencoded_value + 1, i);
+                decoded_str[i] = '\0';
+
+                return decoded_str;
+            }
+        }
     } else {
         fprintf(stderr, "Only strings are supported at the moment\n");
         exit(1);
     }
+
+    return NULL;  // by default
 }
 
 int main(int argc, char* argv[]) {
@@ -47,9 +64,18 @@ int main(int argc, char* argv[]) {
         const char* encoded_str = argv[2];
 
         char* decoded_str = decode_bencode(encoded_str);
-        printf("\"%s\"\n", decoded_str);
 
-        free(decoded_str);  // free memory
+        if(decoded_str != NULL) {  // error checking\
+
+            if(encoded_str[0] == 'i')
+                printf("%s\n", decoded_str);
+            else
+                printf("\"%s\"\n", decoded_str);
+
+            free(decoded_str);  // free memory
+        } else {
+            fprintf(stderr, "decoder returned NULL\n", command);
+        }
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
         return 1;
