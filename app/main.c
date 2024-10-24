@@ -100,6 +100,14 @@ char* decode_bencode(const char* bencoded_value, int* index) {
     exit(1);
 }
 
+char* extract_value(const char* decoded_str, const char* key, const char* end_marker) {
+    char* start = strstr(decoded_str, key) + strlen(key);
+    char* end   = strstr(start, end_marker);
+    int size    = end - start;
+
+    return strndup(start, size);
+}
+
 int main(int argc, char* argv[]) {
     // Disable output buffering
     setbuf(stdout, NULL);
@@ -147,17 +155,8 @@ int main(int argc, char* argv[]) {
 
         char* decoded_str = decode_bencode(encoded_str, &index);  // decode
 
-        const char* tracker_key     = "\"announce\":\"";
-        char* tracker_start = strstr(decoded_str, tracker_key) + strlen(tracker_key);
-        char* tracker_end   = strstr(tracker_start, "\"");
-        int tracker_size    = tracker_end - tracker_start;
-        printf("Tracker URL: %s\n", strndup(tracker_start, tracker_size));
-
-        const char* length_key    = "\"length\":";
-        char* length_start = strstr(decoded_str, length_key) + strlen(length_key);
-        char* length_end   = strstr(length_start, ",");
-        int length_size    = length_end - length_start;
-        printf("Length: %s\n", strndup(length_start, length_size));
+        printf("Tracker URL: %s\n", extract_value(decoded_str, "\"announce\":\"", "\""));
+        printf("Length: %s\n", extract_value(decoded_str, "\"length\":", ","));
 
         // printf("%s\n", decoded_str);
 
