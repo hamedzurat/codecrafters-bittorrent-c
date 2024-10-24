@@ -1,7 +1,19 @@
+#include <openssl/sha.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef struct {
+    char* announce;
+    struct {
+        int length;
+        char* name;
+        int piece_length;
+        char* pieces;
+    } info;
+    unsigned char infohash[SHA_DIGEST_LENGTH];
+} TorrentInfo;
 
 bool is_digit(char c) {
     return c >= '0' && c <= '9';
@@ -108,6 +120,25 @@ char* extract_value(const char* decoded_str, const char* key, const char* end_ma
     return strndup(start, size);
 }
 
+TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
+    TorrentInfo torrent;
+    torrent.announce          = extract_value(decoded_str, "\"announce\":\"", "\"");
+    torrent.info.length       = atoi(extract_value(decoded_str, "\"length\":", ","));
+    torrent.info.name         = extract_value(decoded_str, "\"name\":\"", "\"");
+    torrent.info.piece_length = atoi(extract_value(decoded_str, "\"piece length\":", ","));
+    // torrent.info.pieces = extract_value(decoded_str, "\"pieces\":\"", "\"");
+
+    const char* pieces_key = "\"pieces\":\"";
+    char* pieces_start     = strstr(decoded_str, pieces_key) + strlen(pieces_key);
+    torrent.info.pieces    = strndup(pieces_start, 60);
+
+    const char* key = "4:info";
+    char* start     = strstr(encoded_str, key) + strlen(key);
+    SHA1((unsigned char*)start, strlen(start) - 1, torrent.infohash);
+
+    return torrent;
+}
+
 int main(int argc, char* argv[]) {
     // Disable output buffering
     setbuf(stdout, NULL);
@@ -153,13 +184,20 @@ int main(int argc, char* argv[]) {
 
         encoded_str = buffer;
 
-        char* decoded_str = decode_bencode(encoded_str, &index);  // decode
+        char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
+        TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
 
-        printf("Tracker URL: %s\n", extract_value(decoded_str, "\"announce\":\"", "\""));
-        printf("Length: %s\n", extract_value(decoded_str, "\"length\":", ","));
+        printf("Tracker URL: %s\n", torrent.announce);
+        printf("Length: %d\n", torrent.info.length);
+        printf("Info Hash: ");
+        for(int i = 0; i < SHA_DIGEST_LENGTH; i++) printf("%02x", torrent.infohash[i]);
+        printf("\n");
 
         // printf("%s\n", decoded_str);
 
+        free(torrent.announce);
+        free(torrent.info.name);
+        free(torrent.info.pieces);
         free(decoded_str);
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
