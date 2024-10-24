@@ -7,87 +7,68 @@ bool is_digit(char c) {
     return c >= '0' && c <= '9';
 }
 
-char* decode_bencode(const char* bencoded_value) {
-    char first_char = bencoded_value[0];
+char* decode_bencode(const char* bencoded_value, int* index) {
+    char first_char = bencoded_value[*index];
 
+    // Decoding a string (format: <len>:<string>)
     if(is_digit(first_char)) {
-        int src_length          = atoi(bencoded_value);         // decodes string to integer as long as possible
-        const char* colon_index = strchr(bencoded_value, ':');  // finds the index of :
+        int src_length = atoi(bencoded_value + *index);  // Decode string length
 
-        if(colon_index != NULL) {
-            char* decoded_str = (char*)malloc(src_length + 1);  // as lenght is string lenght, it knows how much to allocate
+        while(is_digit(bencoded_value[*index])) (*index)++;  // Move to the ':'
+        (*index)++;                                          // Skip the ':'
 
-            decoded_str[0] = '"';
-            strncpy(decoded_str + 1, colon_index + 1, src_length);  // copies
-            decoded_str[src_length + 1] = '"';
+        char* decoded_str = (char*)malloc(src_length + 3);  // lenght + quotes + string + null
 
-            return decoded_str;
-        } else {
-            fprintf(stderr, "Invalid encoded value: %s\n", bencoded_value);
-            exit(1);
-        }
-    } else if(first_char == 'i') {
-        bool is_invelid = false;
+        decoded_str[0] = '"';
+        strncpy(decoded_str + 1, bencoded_value + *index, src_length);  // Copy the string
+        decoded_str[src_length + 1] = '"';
+        decoded_str[src_length + 2] = '\0';
 
-        int i = 1;                         // to skip i
-        if(bencoded_value[1] == '-') i++;  // for negative number
+        *index += src_length;  // Move index forward by string length
 
-        for(; bencoded_value[i] != '\0'; i++) {
-            if(!is_digit(bencoded_value[i]) && bencoded_value[i] == 'e') {  // check if there is a 'e' or not and only 'e' not anyother later
-                i--;                                                        // discard bc 'i' and 'e' will count 2 extra
+        return decoded_str;
+    }
+    // Decoding an integer (format: i<integer>e)
+    else if(first_char == 'i') {
+        (*index)++;  // Skip 'i'
 
-                char* decoded_str = (char*)malloc(i);
-                strncpy(decoded_str, bencoded_value + 1, i);
-                decoded_str[i] = '\0';
+        int start = *index;
+        while(bencoded_value[*index] != 'e') (*index)++;  // Find 'e'
 
-                return decoded_str;
-            } else {
-                is_invelid = true;
-            }
-        }
-        if(is_invelid) {
-            fprintf(stderr, "Invalid encoded value: %s\n", bencoded_value);
-            exit(1);
-        }
-    } else if(first_char == 'l') {
-        int index         = 1;
-        char* decoded_str = (char*)malloc(strlen(bencoded_value));
+        int length = *index - start;
 
+        char* decoded_str = (char*)malloc(length + 1);  // integer string + null
+        strncpy(decoded_str, bencoded_value + start, length);
+        decoded_str[length] = '\0';
+
+        (*index)++;  // Skip 'e'
+
+        return decoded_str;
+    }
+    // Decoding a list (format: l<values>e)
+    else if(first_char == 'l') {
+        (*index)++;  // Skip 'l'
+
+        char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of list + brackets + null
         strcpy(decoded_str, "[");
+        bool first_element = true;
 
-        while(bencoded_value[index] != 'e' && index <= strlen(bencoded_value)) {
-            char* decoded_part_str = decode_bencode(bencoded_value + index);
-            int size               = strlen(decoded_part_str);
+        while(bencoded_value[*index] != 'e') {  // Until end of list
+            if(!first_element) strcat(decoded_str, ",");
 
-            if(decoded_part_str[0] == '"') {
-                int actual_size = size - 2;
-                index += actual_size + 1;  // offseting string size + ':'
-
-                while(actual_size != 0) {  // adding string size in as string
-                    actual_size /= 10;
-                    index++;
-                }
-            } else if(is_digit(decoded_part_str[0])) {
-                index += size + 2;
-            } else if(decoded_part_str[0] == '[') {
-                index += size + 2;
-            }
-
+            char* decoded_part_str = decode_bencode(bencoded_value, index);
             strcat(decoded_str, decoded_part_str);
-            strcat(decoded_str, ",");
-
             free(decoded_part_str);
+
+            first_element = false;
         }
 
-        if(decoded_str[strlen(decoded_str) - 1] == ',') {
-            decoded_str[strlen(decoded_str) - 1] = ']';  // replace last , with ]
-        } else {
-            strcat(decoded_str, "]");
-        }
+        (*index)++;  // Skip 'e'
+        strcat(decoded_str, "]");
 
         return decoded_str;
     } else {
-        fprintf(stderr, "Only strings are supported at the moment\n");
+        fprintf(stderr, "Unsupported bencoded value: %s\n", bencoded_value);
         exit(1);
     }
 
@@ -110,7 +91,8 @@ int main(int argc, char* argv[]) {
 
     // switch
     if(strcmp(command, "decode") == 0) {
-        char* decoded_str = decode_bencode(encoded_str);
+        int index         = 0;
+        char* decoded_str = decode_bencode(encoded_str, &index);
 
         if(decoded_str != NULL) {  // error checking
             printf("%s\n", decoded_str);
