@@ -99,6 +99,7 @@ char* decode_bencode(const char* bencoded_value, int* index) {
     fprintf(stderr, "decoder returned nothing\n");
     exit(1);
 }
+
 int main(int argc, char* argv[]) {
     // Disable output buffering
     setbuf(stdout, NULL);
@@ -150,19 +151,13 @@ int main(int argc, char* argv[]) {
         char* tracker_start = strstr(decoded_str, tracker_key) + strlen(tracker_key);
         char* tracker_end   = strstr(tracker_start, "\"");
         int tracker_size    = tracker_end - tracker_start;
-        char* tracker       = (char*)malloc(tracker_size);
-        strncpy(tracker, tracker_start, tracker_size);
-        printf("Tracker URL: %s\n", tracker);
-        free(tracker);
+        printf("Tracker URL: %s\n", strndup(tracker_start, tracker_size));
 
         const char* length_key    = "\"length\":";
         char* length_start = strstr(decoded_str, length_key) + strlen(length_key);
         char* length_end   = strstr(length_start, ",");
         int length_size    = length_end - length_start;
-        char* length       = (char*)malloc(length_size);
-        strncpy(length, length_start, length_size);
-        printf("Length: %s\n", length);
-        free(length);
+        printf("Length: %s\n", strndup(length_start, length_size));
 
         // printf("%s\n", decoded_str);
 
