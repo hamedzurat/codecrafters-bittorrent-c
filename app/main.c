@@ -1,3 +1,4 @@
+#include <curl/curl.h>
 #include <openssl/sha.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -15,6 +16,14 @@ typedef struct {
     } info;
     unsigned char infohash[SHA_DIGEST_LENGTH];
 } TorrentInfo;
+
+typedef struct {
+    int interval;
+    int min_interval;
+    int complete;
+    int incomplete;
+    unsigned char* peers;
+} TrackerRes;
 
 bool is_digit(char c) {
     return c >= '0' && c <= '9';
@@ -115,10 +124,27 @@ char* decode_bencode(const char* bencoded_value, int* index) {
 
 char* extract_value(const char* decoded_str, const char* key, const char* end_marker) {
     char* start = strstr(decoded_str, key) + strlen(key);
-    char* end   = strstr(start, end_marker);
-    int size    = end - start;
+    if(start - strlen(key) == NULL) {
+        fprintf(stderr, "value extraction failed for: %s,%s,%s\n", decoded_str, key, end_marker);
+        exit(1);
+    }
 
-    return strndup(start, size);
+    char* end = strstr(start, end_marker);
+    if(end == NULL) {
+        fprintf(stderr, "value extraction failed for: %s,%s,%s\n", decoded_str, key, end_marker);
+        exit(1);
+    }
+
+    return strndup(start, end - start);
+}
+
+int extract_int(const char* encoded_str, const char* key) {
+    int index = 0;
+    char* tmp = decode_bencode(strstr(encoded_str, key) + strlen(key), &index);
+    int ret   = atoi(tmp);
+
+    free(tmp);
+    return ret;
 }
 
 TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
@@ -148,6 +174,58 @@ TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
     return torrent;
 }
 
+char* open_file(char* filename) {
+    FILE* file = fopen(filename, "rb");
+    if(!file) {
+        fprintf(stderr, "Failed to open file\n");
+        exit(1);
+    }
+
+    fseek(file, 0, SEEK_END);      // go to end of file
+    long file_size = ftell(file);  // get position of the file pointer
+    fseek(file, 0, SEEK_SET);      // go to start of file
+
+    char* buffer = (char*)malloc(file_size + 1);
+
+    size_t bytes_read  = fread(buffer, 1, file_size, file);  // copy into buffer
+    buffer[bytes_read] = '\0';
+
+    fclose(file);
+
+    return buffer;
+}
+
+size_t callback(void* ptr, size_t size, size_t nmemb, void* stream) {
+    int index         = 0;
+    char* decoded_str = decode_bencode(ptr, &index);  // decode
+
+    TrackerRes tres;
+    tres.interval     = extract_int(ptr, "8:interval");
+    tres.min_interval = extract_int(ptr, "12:min interval");
+    tres.complete     = extract_int(ptr, "8:complete");
+    tres.incomplete   = extract_int(ptr, "10:incomplete");
+
+    char* peers_val_start = strstr(ptr, "5:peers") + strlen("5:peers");
+    char* peers_start     = strstr(peers_val_start, ":") + 1;
+    int peer_numer        = atoi(peers_val_start);
+    tres.peers            = malloc(peer_numer);
+    memcpy(tres.peers, peers_start, peer_numer);
+
+    for(size_t i = 0; i < peer_numer; i += 6) {
+        unsigned char ip1 = tres.peers[i + 0];
+        unsigned char ip2 = tres.peers[i + 1];
+        unsigned char ip3 = tres.peers[i + 2];
+        unsigned char ip4 = tres.peers[i + 3];
+        uint16_t port     = (tres.peers[i + 4] << 8) | tres.peers[i + 5];  // 2 bytes for port
+
+        printf("%d.%d.%d.%d:%d\n", ip1, ip2, ip3, ip4, port);
+    }
+
+    free(decoded_str);
+    free(tres.peers);
+    return size * nmemb;
+}
+
 int main(int argc, char* argv[]) {
     // Disable output buffering
     setbuf(stdout, NULL);
@@ -172,26 +250,7 @@ int main(int argc, char* argv[]) {
 
         free(decoded_str);
     } else if(strcmp(command, "info") == 0) {
-        const char* filename = argv[2];
-
-        FILE* file = fopen(filename, "rb");
-        if(!file) {
-            fprintf(stderr, "Failed to open file\n", command);
-            return 1;
-        }
-
-        fseek(file, 0, SEEK_END);      // go to end of file
-        long file_size = ftell(file);  // get position of the file pointer
-        fseek(file, 0, SEEK_SET);      // go to start of file
-
-        char* buffer = (char*)malloc(file_size + 1);
-
-        size_t bytes_read  = fread(buffer, 1, file_size, file);  // copy into buffer
-        buffer[bytes_read] = '\0';
-
-        fclose(file);
-
-        encoded_str = buffer;
+        encoded_str = open_file(argv[2]);
 
         char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
         TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
@@ -210,6 +269,44 @@ int main(int argc, char* argv[]) {
         printf("\n");
 
         // printf("%s\n", decoded_str);
+
+        free(torrent.announce);
+        free(torrent.info.name);
+        free(torrent.info.pieces);
+        free(decoded_str);
+    } else if(strcmp(command, "peers") == 0) {
+        encoded_str         = open_file(argv[2]);
+        char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
+        TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
+
+        CURL* curl;
+        CURLcode res;
+
+        char* announce = torrent.announce;
+        char* infohash = curl_easy_escape(NULL, torrent.infohash, 20);
+        char* peer_id  = curl_easy_escape(NULL, "-PC0001-123456789012", 20);
+        int port       = 6881;
+        int uploaded   = 0;
+        int downloaded = 0;
+        int left       = torrent.info.length;
+        int compact    = 1;
+
+        char url[512];
+        snprintf(url, sizeof(url), "%s?info_hash=%s&peer_id=%s&port=%d&uploaded=%d&downloaded=%d&left=%d&compact=%d", announce, infohash, peer_id, port, uploaded, downloaded, left, compact);
+
+        curl_global_init(CURL_GLOBAL_DEFAULT);
+        curl = curl_easy_init();
+        if(curl) {
+            curl_easy_setopt(curl, CURLOPT_URL, url);
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, callback);
+            res = curl_easy_perform(curl);
+
+            if(res != CURLE_OK) fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+
+            curl_easy_cleanup(curl);
+        }
+
+        curl_global_cleanup();
 
         free(torrent.announce);
         free(torrent.info.name);
