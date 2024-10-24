@@ -131,12 +131,18 @@ TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
     char* piece_val_start           = strstr(encoded_str, "6:pieces") + strlen("6:pieces");
     char* pieces_start              = strstr(piece_val_start, ":") + 1;
     torrent.info.encoded_pieces_len = atoi(piece_val_start);
-    torrent.info.pieces             = strndup(pieces_start, torrent.info.encoded_pieces_len);
+    torrent.info.pieces             = malloc(torrent.info.encoded_pieces_len);
+    memcpy(torrent.info.pieces, pieces_start, torrent.info.encoded_pieces_len);
 
     // reencode bencode
-    char* info_bencoded = malloc(strlen(encoded_str));
-    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:%se", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len, torrent.info.pieces);
-    SHA1((unsigned char*)info_bencoded, strlen(info_bencoded), torrent.infohash);
+    int info_bencoded_len = snprintf(NULL, 0, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
+    char* info_bencoded   = malloc(info_bencoded_len + torrent.info.encoded_pieces_len + 2);  // +2 for 'e' + null
+    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
+    memcpy(info_bencoded + info_bencoded_len, torrent.info.pieces, torrent.info.encoded_pieces_len);
+    info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len]     = 'e';
+    info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len + 1] = '\0';
+
+    SHA1((unsigned char*)info_bencoded, info_bencoded_len + torrent.info.encoded_pieces_len + 1, torrent.infohash);
 
     free(info_bencoded);
     return torrent;
