@@ -10,7 +10,7 @@ typedef struct {
         int length;
         char* name;
         int piece_length;
-        char* pieces;
+        unsigned char* pieces;
         int encoded_pieces_len;
     } info;
     unsigned char infohash[SHA_DIGEST_LENGTH];
@@ -135,14 +135,14 @@ TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
     memcpy(torrent.info.pieces, pieces_start, torrent.info.encoded_pieces_len);
 
     // reencode bencode
-    int info_bencoded_len = snprintf(NULL, 0, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
-    char* info_bencoded   = malloc(info_bencoded_len + torrent.info.encoded_pieces_len + 2);  // +2 for 'e' + null
+    int info_bencoded_len        = snprintf(NULL, 0, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
+    unsigned char* info_bencoded = malloc(info_bencoded_len + torrent.info.encoded_pieces_len + 2);  // +2 for 'e' + null
     sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
     memcpy(info_bencoded + info_bencoded_len, torrent.info.pieces, torrent.info.encoded_pieces_len);
     info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len]     = 'e';
     info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len + 1] = '\0';
 
-    SHA1((unsigned char*)info_bencoded, info_bencoded_len + torrent.info.encoded_pieces_len + 1, torrent.infohash);
+    SHA1(info_bencoded, info_bencoded_len + torrent.info.encoded_pieces_len + 1, torrent.infohash);
 
     free(info_bencoded);
     return torrent;
@@ -200,6 +200,13 @@ int main(int argc, char* argv[]) {
         printf("Length: %d\n", torrent.info.length);
         printf("Info Hash: ");
         for(int i = 0; i < SHA_DIGEST_LENGTH; i++) printf("%02x", torrent.infohash[i]);
+        printf("\n");
+        printf("Piece Length: %d\n", torrent.info.piece_length);
+        printf("Piece Hashes:");
+        for(int i = 0; i < torrent.info.encoded_pieces_len; i++) {
+            if(i % SHA_DIGEST_LENGTH == 0) printf("\n");
+            printf("%02x", torrent.info.pieces[i]);
+        }
         printf("\n");
 
         // printf("%s\n", decoded_str);
