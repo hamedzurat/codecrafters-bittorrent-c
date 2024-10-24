@@ -11,6 +11,7 @@ typedef struct {
         char* name;
         int piece_length;
         char* pieces;
+        int encoded_pieces_len;
     } info;
     unsigned char infohash[SHA_DIGEST_LENGTH];
 } TorrentInfo;
@@ -127,13 +128,14 @@ TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
     torrent.info.name         = extract_value(decoded_str, "\"name\":\"", "\"");
     torrent.info.piece_length = atoi(extract_value(decoded_str, "\"piece length\":", ","));
 
-    char* pieces_start  = strstr(extract_value(encoded_str, "6:pieces", "ee"), ":") + 1;
-    int len             = strstr(encoded_str, "ee") - pieces_start;
-    torrent.info.pieces = strndup(pieces_start, len);
+    char* piece_val_start           = strstr(encoded_str, "6:pieces") + strlen("6:pieces");
+    char* pieces_start              = strstr(piece_val_start, ":") + 1;
+    torrent.info.encoded_pieces_len = atoi(piece_val_start);
+    torrent.info.pieces             = strndup(pieces_start, torrent.info.encoded_pieces_len);
 
     // reencode bencode
     char* info_bencoded = malloc(strlen(encoded_str));
-    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:%se", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, strlen(torrent.info.pieces), torrent.info.pieces);
+    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:%se", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len, torrent.info.pieces);
     SHA1((unsigned char*)info_bencoded, strlen(info_bencoded), torrent.infohash);
 
     free(info_bencoded);
