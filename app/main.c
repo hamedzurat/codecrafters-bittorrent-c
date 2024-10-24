@@ -117,23 +117,47 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    const char* command     = argv[1];
-    const char* encoded_str = argv[2];
+    const char* command = argv[1];
+    const char* encoded_str;
 
     // switch
     if(strcmp(command, "decode") == 0) {
-        int index         = 0;
-        char* decoded_str = decode_bencode(encoded_str, &index);
+        encoded_str = argv[2];
+    } else if(strcmp(command, "info") == 0) {
+        const char* filename = argv[2];
 
-        if(decoded_str != NULL) {  // error checking
-            printf("%s\n", decoded_str);
-            free(decoded_str);  // free memory
-        } else {
-            fprintf(stderr, "decoder returned NULL\n", command);
+        FILE* file = fopen(filename, "rb");
+        if(!file) {
+            fprintf(stderr, "Failed to open file\n", command);
             return 1;
         }
+
+        fseek(file, 0, SEEK_END);      // go to end of file
+        long file_size = ftell(file);  // get position of the file pointer
+        fseek(file, 0, SEEK_SET);      // go to start of file
+
+        char* buffer = (char*)malloc(file_size + 1);
+
+        // Read the file contents into the buffer
+        size_t bytes_read       = fread(buffer, 1, file_size, file);
+        buffer[bytes_read] = '\0';  // Null-terminate the string
+
+        fclose(file);
+
+        encoded_str = buffer;
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
+        return 1;
+    }
+
+    int index         = 0;
+    char* decoded_str = decode_bencode(encoded_str, &index);
+
+    if(decoded_str != NULL) {  // error checking
+        printf("%s\n", decoded_str);
+        free(decoded_str);  // free memory
+    } else {
+        fprintf(stderr, "decoder returned NULL\n", command);
         return 1;
     }
 
