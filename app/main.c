@@ -67,6 +67,37 @@ char* decode_bencode(const char* bencoded_value, int* index) {
         strcat(decoded_str, "]");
 
         return decoded_str;
+    }
+    // Decoding a dictionary (format: d<key1><value1>...<keyN><valueN>e)
+    else if(first_char == 'd') {
+        (*index)++;  // Skip 'd'
+
+        char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of dictionary + brackets + null
+        strcpy(decoded_str, "{");
+        bool first_element = true;
+
+        int key_or_val = 0;  // if key its odd number, or when its val its even
+
+        while(bencoded_value[*index] != 'e') {  // Until end of list
+            if(key_or_val % 2 == 0) {
+                if(!first_element) strcat(decoded_str, ",");
+            } else {
+                strcat(decoded_str, ":");
+            }
+
+            char* decoded_part_str = decode_bencode(bencoded_value, index);
+            strcat(decoded_str, decoded_part_str);
+            free(decoded_part_str);
+
+            first_element = false;
+            key_or_val++;
+        }
+
+        (*index)++;  // Skip 'e'
+        strcat(decoded_str, "}");
+
+        return decoded_str;
+
     } else {
         fprintf(stderr, "Unsupported bencoded value: %s\n", bencoded_value);
         exit(1);
