@@ -10,8 +10,7 @@ bool is_digit(char c) {
 char* decode_bencode(const char* bencoded_value, int* index) {
     char first_char = bencoded_value[*index];
 
-    // Decoding a string (format: <len>:<string>)
-    if(is_digit(first_char)) {
+    if(is_digit(first_char)) {                           // Decoding a string (format: <len>:<string>)
         int src_length = atoi(bencoded_value + *index);  // Decode string length
 
         while(is_digit(bencoded_value[*index])) (*index)++;  // Move to the ':'
@@ -27,10 +26,8 @@ char* decode_bencode(const char* bencoded_value, int* index) {
         *index += src_length;  // Move index forward by string length
 
         return decoded_str;
-    }
-    // Decoding an integer (format: i<integer>e)
-    else if(first_char == 'i') {
-        (*index)++;  // Skip 'i'
+    } else if(first_char == 'i') {  // Decoding an integer (format: i<integer>e)
+        (*index)++;                 // Skip 'i'
 
         int start = *index;
         while(bencoded_value[*index] != 'e') (*index)++;  // Find 'e'
@@ -44,10 +41,8 @@ char* decode_bencode(const char* bencoded_value, int* index) {
         (*index)++;  // Skip 'e'
 
         return decoded_str;
-    }
-    // Decoding a list (format: l<values>e)
-    else if(first_char == 'l') {
-        (*index)++;  // Skip 'l'
+    } else if(first_char == 'l') {  // Decoding a list (format: l<values>e)
+        (*index)++;                 // Skip 'l'
 
         char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of list + brackets + null
         strcpy(decoded_str, "[");
@@ -67,10 +62,8 @@ char* decode_bencode(const char* bencoded_value, int* index) {
         strcat(decoded_str, "]");
 
         return decoded_str;
-    }
-    // Decoding a dictionary (format: d<key1><value1>...<keyN><valueN>e)
-    else if(first_char == 'd') {
-        (*index)++;  // Skip 'd'
+    } else if(first_char == 'd') {  // Decoding a dictionary (format: d<key1><value1>...<keyN><valueN>e)
+        (*index)++;                 // Skip 'd'
 
         char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of dictionary + brackets + null
         strcpy(decoded_str, "{");
@@ -103,9 +96,9 @@ char* decode_bencode(const char* bencoded_value, int* index) {
         exit(1);
     }
 
-    return NULL;  // by default
+    fprintf(stderr, "decoder returned nothing\n");
+    exit(1);
 }
-
 int main(int argc, char* argv[]) {
     // Disable output buffering
     setbuf(stdout, NULL);
@@ -117,12 +110,18 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    int index           = 0;
     const char* command = argv[1];
     const char* encoded_str;
 
     // switch
     if(strcmp(command, "decode") == 0) {
         encoded_str = argv[2];
+
+        char* decoded_str = decode_bencode(encoded_str, &index);
+        printf("%s\n", decoded_str);
+
+        free(decoded_str);
     } else if(strcmp(command, "info") == 0) {
         const char* filename = argv[2];
 
@@ -138,26 +137,38 @@ int main(int argc, char* argv[]) {
 
         char* buffer = (char*)malloc(file_size + 1);
 
-        // Read the file contents into the buffer
-        size_t bytes_read       = fread(buffer, 1, file_size, file);
-        buffer[bytes_read] = '\0';  // Null-terminate the string
+        size_t bytes_read  = fread(buffer, 1, file_size, file);  // copy into buffer
+        buffer[bytes_read] = '\0';
 
         fclose(file);
 
         encoded_str = buffer;
+
+        char* decoded_str = decode_bencode(encoded_str, &index);  // decode
+
+        const char* tracker_key     = "\"announce\":\"";
+        char* tracker_start = strstr(decoded_str, tracker_key) + strlen(tracker_key);
+        char* tracker_end   = strstr(tracker_start, "\"");
+        int tracker_size    = tracker_end - tracker_start;
+        char* tracker       = (char*)malloc(tracker_size);
+        strncpy(tracker, tracker_start, tracker_size);
+        printf("Tracker URL: %s\n", tracker);
+        free(tracker);
+
+        const char* length_key    = "\"length\":";
+        char* length_start = strstr(decoded_str, length_key) + strlen(length_key);
+        char* length_end   = strstr(length_start, ",");
+        int length_size    = length_end - length_start;
+        char* length       = (char*)malloc(length_size);
+        strncpy(length, length_start, length_size);
+        printf("Length: %s\n", length);
+        free(length);
+
+        // printf("%s\n", decoded_str);
+
+        free(decoded_str);
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
-        return 1;
-    }
-
-    int index         = 0;
-    char* decoded_str = decode_bencode(encoded_str, &index);
-
-    if(decoded_str != NULL) {  // error checking
-        printf("%s\n", decoded_str);
-        free(decoded_str);  // free memory
-    } else {
-        fprintf(stderr, "decoder returned NULL\n", command);
         return 1;
     }
 
