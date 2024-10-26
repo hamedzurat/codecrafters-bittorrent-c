@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <curl/curl.h>
+#include <errno.h>
 #include <openssl/sha.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -7,17 +8,34 @@
 #include <string.h>
 #include <unistd.h>
 
+#define PEER_ID "-PC0001-123456789012"
+#define DEFAULT_PORT 6881
+
+// Error handling macro
+#define HANDLE_ERROR(condition, msg)                           \
+    do {                                                       \
+        if(condition) {                                        \
+            fprintf(stderr, "%s: %s\n", msg, strerror(errno)); \
+            exit(EXIT_FAILURE);                                \
+        }                                                      \
+    } while(0)
+
 typedef struct {
-    char* announce;
-    struct {
-        int length;
-        char* name;
-        int piece_length;
-        unsigned char* pieces;
-        int encoded_pieces_len;
-    } info;
+    unsigned char* name;
+    int length;
+    int piece_length;
+    unsigned char* pieces;
+    int pieces_size;
+} TorrentInfoDict;
+
+typedef struct {
+    unsigned char* announce;
+    unsigned char* created_by;
+    TorrentInfoDict info;
     unsigned char infohash[SHA_DIGEST_LENGTH];
-} TorrentInfo;
+    int uploaded;
+    int downloaded;
+} TorrentMetadata;
 
 typedef struct {
     int interval;
@@ -25,232 +43,243 @@ typedef struct {
     int complete;
     int incomplete;
     unsigned char* peers;
-    int peer_numer;
-} TrackerRes;
+    int peer_count;
+} TrackerResponse;
+
+typedef union {
+    unsigned char raw[48 + SHA_DIGEST_LENGTH];
+    struct {
+        unsigned char protocol_length;
+        char protocol[19];
+        unsigned char reserved[8];
+        unsigned char infohash[SHA_DIGEST_LENGTH];
+        char peer_id[20];
+    } parts;
+} Handshake;
+
+void* safe_malloc(size_t size, const char* context);
+bool is_digit(char c);
+char* decode_string(const char* data, int* index, int length);
+char* decode_integer(const char* data, int* index);
+char* decode_list(const char* data, int* index);
+char* decode_dictionary(const char* data, int* index);
+char* decode_bencode(const char* data, int* index);
+int extract_int(const char* encoded_str, const char* key);
+TorrentMetadata decode_torrent(const char* encoded_str, const char* decoded_str);
+char* read_file(const char* filename);
+static size_t tracker_callback(void* contents, size_t size, size_t nmemb, void* userp);
+TrackerResponse contact_tracker(const TorrentMetadata* torrent);
+unsigned char* byte_to_ip(const unsigned char* peers);
+void hex(const char* header, const unsigned char* src, const int size);
+
+void* safe_malloc(size_t size, const char* context) {
+    void* ptr = malloc(size);
+    if(!ptr) {
+        fprintf(stderr, "Memory allocation failed for %s: %s\n",
+        context, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    return ptr;
+}
 
 bool is_digit(char c) {
     return c >= '0' && c <= '9';
 }
 
-char* decode_bencode(const char* bencoded_value, int* index) {
-    char first_char = bencoded_value[*index];
+char* decode_string(const char* data, int* index, int length) {
+    char* decoded_str = (char*)safe_malloc(length + 3, "decode_string");
 
-    if(is_digit(first_char)) {                           // Decoding a string (format: <len>:<string>)
-        int src_length = atoi(bencoded_value + *index);  // Decode string length
+    decoded_str[0] = '"';
+    memcpy(decoded_str + 1, data + *index, length);
+    decoded_str[length + 1] = '"';
+    decoded_str[length + 2] = '\0';
 
-        while(is_digit(bencoded_value[*index])) (*index)++;  // Move to the ':'
-        (*index)++;                                          // Skip the ':'
-
-        char* decoded_str = (char*)malloc(src_length + 3);  // lenght + quotes + string + null
-
-        decoded_str[0] = '"';
-        strncpy(decoded_str + 1, bencoded_value + *index, src_length);  // Copy the string
-        decoded_str[src_length + 1] = '"';
-        decoded_str[src_length + 2] = '\0';
-
-        *index += src_length;  // Move index forward by string length
-
-        return decoded_str;
-    } else if(first_char == 'i') {  // Decoding an integer (format: i<integer>e)
-        (*index)++;                 // Skip 'i'
-
-        int start = *index;
-        while(bencoded_value[*index] != 'e') (*index)++;  // Find 'e'
-
-        int length = *index - start;
-
-        char* decoded_str = (char*)malloc(length + 1);  // integer string + null
-        strncpy(decoded_str, bencoded_value + start, length);
-        decoded_str[length] = '\0';
-
-        (*index)++;  // Skip 'e'
-
-        return decoded_str;
-    } else if(first_char == 'l') {  // Decoding a list (format: l<values>e)
-        (*index)++;                 // Skip 'l'
-
-        char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of list + brackets + null
-        strcpy(decoded_str, "[");
-        bool first_element = true;
-
-        while(bencoded_value[*index] != 'e') {  // Until end of list
-            if(!first_element) strcat(decoded_str, ",");
-
-            char* decoded_part_str = decode_bencode(bencoded_value, index);
-            strcat(decoded_str, decoded_part_str);
-            free(decoded_part_str);
-
-            first_element = false;
-        }
-
-        (*index)++;  // Skip 'e'
-        strcat(decoded_str, "]");
-
-        return decoded_str;
-    } else if(first_char == 'd') {  // Decoding a dictionary (format: d<key1><value1>...<keyN><valueN>e)
-        (*index)++;                 // Skip 'd'
-
-        char* decoded_str = (char*)malloc(strlen(bencoded_value) + 3);  // lenght of dictionary + brackets + null
-        strcpy(decoded_str, "{");
-        bool first_element = true;
-
-        int key_or_val = 0;  // if key its odd number, or when its val its even
-
-        while(bencoded_value[*index] != 'e') {  // Until end of list
-            if(key_or_val % 2 == 0) {
-                if(!first_element) strcat(decoded_str, ",");
-            } else {
-                strcat(decoded_str, ":");
-            }
-
-            char* decoded_part_str = decode_bencode(bencoded_value, index);
-            strcat(decoded_str, decoded_part_str);
-            free(decoded_part_str);
-
-            first_element = false;
-            key_or_val++;
-        }
-
-        (*index)++;  // Skip 'e'
-        strcat(decoded_str, "}");
-
-        return decoded_str;
-
-    } else {
-        fprintf(stderr, "Unsupported bencoded value: %s\n", bencoded_value);
-        exit(1);
-    }
-
-    fprintf(stderr, "decoder returned nothing\n");
-    exit(1);
+    *index += length;
+    return decoded_str;
 }
 
-char* extract_value(const char* decoded_str, const char* key, const char* end_marker) {
-    char* start = strstr(decoded_str, key) + strlen(key);
-    if(start - strlen(key) == NULL) {
-        fprintf(stderr, "value extraction failed for: %s,%s,%s\n", decoded_str, key, end_marker);
+char* decode_integer(const char* data, int* index) {
+    (*index)++;  // Skip 'i'
+    int start = *index;
+    while(data[*index] != 'e' && (is_digit(data[*index]) || data[*index] == '-')) (*index)++;
+    int length        = *index - start;
+    char* decoded_str = (char*)safe_malloc(length + 1, "decode_integer");
+    memcpy(decoded_str, data + start, length);
+    decoded_str[length] = '\0';
+    (*index)++;  // Skip 'e'
+    return decoded_str;
+}
+
+char* decode_list(const char* data, int* index) {
+    (*index)++;  // // Skip 'l'
+    size_t buffer_size = strlen(data) + 3;
+    char* decoded_str  = safe_malloc(buffer_size, "decoder string for list");
+    strcpy(decoded_str, "[");
+
+    bool first_element = true;
+    while(data[*index] != 'e') {
+        if(!first_element) strcat(decoded_str, ",");
+        first_element = false;
+
+        char* element = decode_bencode(data, index);
+        strcat(decoded_str, element);
+        free(element);
+    }
+    (*index)++;  // Skip 'e'
+    strcat(decoded_str, "]");
+    return decoded_str;
+}
+
+char* decode_dictionary(const char* data, int* index) {
+    (*index)++;  // Skip 'd'
+    size_t buffer_size = strlen(data) + 3;
+    char* decoded_str  = safe_malloc(buffer_size, "decoder string for dictionary");
+    strcpy(decoded_str, "{");
+
+    bool first_element = true;
+    while(data[*index] != 'e') {
+        if(!first_element) strcat(decoded_str, ",");
+        first_element = false;
+
+        char* key = decode_bencode(data, index);
+        strcat(decoded_str, key);
+
+        strcat(decoded_str, ":");
+
+        char* value = decode_bencode(data, index);
+        strcat(decoded_str, value);
+
+        free(key);
+        free(value);
+    }
+    (*index)++;  // Skip 'e'
+    strcat(decoded_str, "}");
+    return decoded_str;
+}
+
+char* decode_bencode(const char* data, int* index) {
+    char type = data[*index];
+    if(is_digit(type)) {
+        int length = atoi(data + *index);
+        while(is_digit(data[*index])) (*index)++;
+        (*index)++;  // Skip ':'
+        return decode_string(data, index, length);
+    }
+    switch(type) {
+    case 'i': return decode_integer(data, index);
+    case 'l': return decode_list(data, index);
+    case 'd': return decode_dictionary(data, index);
+    default:
+        fprintf(stderr, "Unsupported bencoded type: %c\n", type);
         exit(1);
     }
-
-    char* end = strstr(start, end_marker);
-    if(end == NULL) {
-        fprintf(stderr, "value extraction failed for: %s,%s,%s\n", decoded_str, key, end_marker);
-        exit(1);
-    }
-
-    return strndup(start, end - start);
 }
 
 int extract_int(const char* encoded_str, const char* key) {
     int index = 0;
-    char* tmp = decode_bencode(strstr(encoded_str, key) + strlen(key), &index);
+    char* tmp = decode_integer(strstr(encoded_str, key) + strlen(key), &index);
     int ret   = atoi(tmp);
 
     free(tmp);
     return ret;
 }
 
-TorrentInfo decode_torrent(const char* encoded_str, const char* decoded_str) {
-    TorrentInfo torrent;
-    torrent.announce          = extract_value(decoded_str, "\"announce\":\"", "\"");
-    torrent.info.length       = atoi(extract_value(decoded_str, "\"length\":", ","));
-    torrent.info.name         = extract_value(decoded_str, "\"name\":\"", "\"");
-    torrent.info.piece_length = atoi(extract_value(decoded_str, "\"piece length\":", ","));
+void extract_str(const char* encoded_str, const char* key, int* len, unsigned char** bin) {
+    const char* val_start = strstr(encoded_str, key) + strlen(key);
+    char* start           = strstr(val_start, ":") + 1;
+    *len                  = atoi(val_start);
+    *bin                  = safe_malloc(*len, "extract_str");
+    memcpy(*bin, start, *len);
+}
 
-    char* piece_val_start           = strstr(encoded_str, "6:pieces") + strlen("6:pieces");
-    char* pieces_start              = strstr(piece_val_start, ":") + 1;
-    torrent.info.encoded_pieces_len = atoi(piece_val_start);
-    torrent.info.pieces             = malloc(torrent.info.encoded_pieces_len);
-    memcpy(torrent.info.pieces, pieces_start, torrent.info.encoded_pieces_len);
+TorrentMetadata decode_torrent(const char* encoded_str, const char* decoded_str) {
+    TorrentMetadata torrent;
+    int tmp_len;
+
+    printf("%s\n", encoded_str);
+    printf("%s\n", decoded_str);
+
+    extract_str(encoded_str, "8:announce", &tmp_len, &torrent.announce);
+    extract_str(encoded_str, "10:created by", &tmp_len, &torrent.created_by);
+    extract_str(encoded_str, "4:name", &tmp_len, &torrent.info.name);
+    extract_str(encoded_str, "6:pieces", &torrent.info.pieces_size, &torrent.info.pieces);
+    torrent.info.length       = extract_int(encoded_str, "6:length");
+    torrent.info.piece_length = extract_int(encoded_str, "12:piece length");
+    torrent.uploaded   = 0;
+    torrent.downloaded = 0;
 
     // reencode bencode
-    int info_bencoded_len        = snprintf(NULL, 0, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
-    unsigned char* info_bencoded = malloc(info_bencoded_len + torrent.info.encoded_pieces_len + 2);  // +2 for 'e' + null
-    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.encoded_pieces_len);
-    memcpy(info_bencoded + info_bencoded_len, torrent.info.pieces, torrent.info.encoded_pieces_len);
-    info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len]     = 'e';
-    info_bencoded[info_bencoded_len + torrent.info.encoded_pieces_len + 1] = '\0';
+    int info_bencoded_len        = snprintf(NULL, 0, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.pieces_size);
+    unsigned char* info_bencoded = safe_malloc(info_bencoded_len + torrent.info.pieces_size + 2, "for calculating infohash");  // +2 for 'e' + null
+    sprintf(info_bencoded, "d6:lengthi%de4:name%d:%s12:piece lengthi%de6:pieces%d:", torrent.info.length, strlen(torrent.info.name), torrent.info.name, torrent.info.piece_length, torrent.info.pieces_size);
+    memcpy(info_bencoded + info_bencoded_len, torrent.info.pieces, torrent.info.pieces_size);
+    info_bencoded[info_bencoded_len + torrent.info.pieces_size]     = 'e';
+    info_bencoded[info_bencoded_len + torrent.info.pieces_size + 1] = '\0';
 
-    SHA1(info_bencoded, info_bencoded_len + torrent.info.encoded_pieces_len + 1, torrent.infohash);
+    SHA1(info_bencoded, info_bencoded_len + torrent.info.pieces_size + 1, torrent.infohash);
 
     free(info_bencoded);
     return torrent;
 }
 
-char* open_file(char* filename) {
+char* read_file(const char* filename) {
     FILE* file = fopen(filename, "rb");
-    if(!file) {
-        fprintf(stderr, "Failed to open file\n");
-        exit(1);
-    }
+    HANDLE_ERROR(!file, "Failed to open file");
 
-    fseek(file, 0, SEEK_END);      // go to end of file
-    long file_size = ftell(file);  // get position of the file pointer
-    fseek(file, 0, SEEK_SET);      // go to start of file
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
 
-    char* buffer = (char*)malloc(file_size + 1);
+    char* buffer = safe_malloc(file_size + 1, "file -> buffer");
 
-    size_t bytes_read  = fread(buffer, 1, file_size, file);  // copy into buffer
+    size_t bytes_read = fread(buffer, 1, file_size, file);
+    HANDLE_ERROR(bytes_read != file_size, "File read failed");
+
     buffer[bytes_read] = '\0';
-
     fclose(file);
-
     return buffer;
 }
 
-size_t callback(void* ptr, size_t size, size_t nmemb, void* stream) {
-    int index         = 0;
-    char* decoded_str = decode_bencode(ptr, &index);  // decode
-    TrackerRes* tres  = (TrackerRes*)stream;
+static size_t tracker_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    TrackerResponse* response = (TrackerResponse*)userp;
 
-    tres->interval     = extract_int(ptr, "8:interval");
-    tres->min_interval = extract_int(ptr, "12:min interval");
-    tres->complete     = extract_int(ptr, "8:complete");
-    tres->incomplete   = extract_int(ptr, "10:incomplete");
+    response->interval     = extract_int(contents, "8:interval");
+    response->min_interval = extract_int(contents, "12:min interval");
+    response->complete     = extract_int(contents, "8:complete");
+    response->incomplete   = extract_int(contents, "10:incomplete");
 
-    char* peers_val_start = strstr(ptr, "5:peers") + strlen("5:peers");
-    char* peers_start     = strstr(peers_val_start, ":") + 1;
-    tres->peer_numer      = atoi(peers_val_start);
-    tres->peers           = malloc(tres->peer_numer);
-    memcpy(tres->peers, peers_start, tres->peer_numer);
+    extract_str(contents, "5:peers", &response->peer_count, &response->peers);
 
-    free(decoded_str);
     return size * nmemb;
 }
 
-TrackerRes call_tracker(TorrentInfo torrent) {
-    CURL* curl;
-    CURLcode res;
-    TrackerRes tres;
+TrackerResponse contact_tracker(const TorrentMetadata* torrent) {
+    CURL* curl = curl_easy_init();
+    HANDLE_ERROR(!curl, "CURL initialization failed");
 
-    char* announce = torrent.announce;
-    char* infohash = curl_easy_escape(NULL, torrent.infohash, 20);
-    char* peer_id  = curl_easy_escape(NULL, "-PC0001-123456789012", 20);
-    int port       = 6881;
-    int uploaded   = 0;
-    int downloaded = 0;
-    int left       = torrent.info.length;
-    int compact    = 1;
+    // Build tracker URL with proper escaping
+    char* escaped_infohash = curl_easy_escape(curl, (char*)torrent->infohash, 20);
+    char* escaped_peer_id  = curl_easy_escape(curl, PEER_ID, 20);
 
     char url[512];
-    snprintf(url, sizeof(url), "%s?info_hash=%s&peer_id=%s&port=%d&uploaded=%d&downloaded=%d&left=%d&compact=%d", announce, infohash, peer_id, port, uploaded, downloaded, left, compact);
+    snprintf(url, sizeof(url),
+    "%s?info_hash=%s&peer_id=%s&port=%d&uploaded=%d&downloaded=%d&left=%d&compact=1",
+    torrent->announce, escaped_infohash, escaped_peer_id, DEFAULT_PORT, torrent->uploaded, torrent->downloaded, (torrent->info.length - torrent->downloaded));
 
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    curl = curl_easy_init();
-    if(curl) {
-        curl_easy_setopt(curl, CURLOPT_URL, url);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void*)&tres);
+    TrackerResponse response = { 0 };
 
-        res = curl_easy_perform(curl);
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, tracker_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-        if(res != CURLE_OK) fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
+    CURLcode res = curl_easy_perform(curl);
+    HANDLE_ERROR(res != CURLE_OK, curl_easy_strerror(res));
 
-        curl_easy_cleanup(curl);
-    }
+    curl_free(escaped_infohash);
+    curl_free(escaped_peer_id);
+    curl_easy_cleanup(curl);
 
-    curl_global_cleanup();
-    return tres;
+    return response;
 }
 
 unsigned char* byte_to_ip(const unsigned char* peers) {
@@ -299,11 +328,13 @@ int main(int argc, char* argv[]) {
 
         free(decoded_str);
     } else if(strcmp(command, "info") == 0) {
-        encoded_str = open_file(argv[2]);
+        encoded_str = read_file(argv[2]);
 
-        char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
-        TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
+        char* decoded_str       = decode_bencode(encoded_str, &index);  // decode
+        TorrentMetadata torrent = decode_torrent(encoded_str, decoded_str);
 
+        printf("Name: %s\n", torrent.info.name);
+        // printf("Created By: %s\n", torrent.created_by);
         printf("Tracker URL: %s\n", torrent.announce);
         printf("Length: %d\n", torrent.info.length);
         printf("Info Hash: ");
@@ -311,7 +342,7 @@ int main(int argc, char* argv[]) {
         printf("\n");
         printf("Piece Length: %d\n", torrent.info.piece_length);
         printf("Piece Hashes:");
-        for(int i = 0; i < torrent.info.encoded_pieces_len; i++) {
+        for(int i = 0; i < torrent.info.pieces_size; i++) {
             if(i % SHA_DIGEST_LENGTH == 0) printf("\n");
             printf("%02x", torrent.info.pieces[i]);
         }
@@ -324,13 +355,12 @@ int main(int argc, char* argv[]) {
         free(torrent.info.pieces);
         free(decoded_str);
     } else if(strcmp(command, "peers") == 0) {
-        encoded_str         = open_file(argv[2]);
-        char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
-        TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
+        encoded_str             = read_file(argv[2]);
+        char* decoded_str       = decode_bencode(encoded_str, &index);  // decode
+        TorrentMetadata torrent = decode_torrent(encoded_str, decoded_str);
+        TrackerResponse tres    = contact_tracker(&torrent);
 
-        TrackerRes tres = call_tracker(torrent);
-
-        for(size_t i = 0; i < tres.peer_numer; i += 6) {
+        for(size_t i = 0; i < tres.peer_count; i += 6) {
             printf("%s\n", byte_to_ip(tres.peers + i));
         }
 
@@ -340,15 +370,15 @@ int main(int argc, char* argv[]) {
         free(tres.peers);
         free(decoded_str);
     } else if(strcmp(command, "handshake") == 0) {
-        encoded_str         = open_file(argv[2]);
-        char* decoded_str   = decode_bencode(encoded_str, &index);  // decode
-        TorrentInfo torrent = decode_torrent(encoded_str, decoded_str);
+        encoded_str             = read_file(argv[2]);
+        char* decoded_str       = decode_bencode(encoded_str, &index);  // decode
+        TorrentMetadata torrent = decode_torrent(encoded_str, decoded_str);
 
         unsigned char* ip_port = argv[3];
 
         if(argc < 4) {
-            TrackerRes tres = call_tracker(torrent);
-            ip_port         = byte_to_ip(tres.peers);
+            TrackerResponse tres = contact_tracker(&torrent);
+            ip_port              = byte_to_ip(tres.peers);
             free(tres.peers);
         }
 
@@ -370,28 +400,21 @@ int main(int argc, char* argv[]) {
 
         int port = atoi(colon_pos + 1);
 
-        // printf("IP: %s\n", ip);
-        // printf("Port: %d\n", port);
+        printf("peer: %s:%d\n", ip, port);
 
-        unsigned char handshake[48 + SHA_DIGEST_LENGTH];
-        size_t offset = 0;
-
+        Handshake handshake;
         // 1. length of the protocol string (BitTorrent protocol) which is 19 (1 byte)
-        handshake[offset] = 19;
-        offset++;
+        handshake.parts.protocol_length = 19;
         // 2. the string BitTorrent protocol (19 bytes)
-        memcpy(handshake + offset, "BitTorrent protocol", 19);
-        offset += 19;
+        strncpy(handshake.parts.protocol, "BitTorrent protocol", 19);
         // 3. eight reserved bytes, which are all set to zero (8 bytes)
-        memset(handshake + offset, 0, 8);
-        offset += 8;
+        memset(handshake.parts.reserved, 0, 8);
         // 4. sha1 infohash (20 bytes) (NOT the hexadecimal representation, which is 40 bytes long)
-        memcpy(handshake + offset, torrent.infohash, SHA_DIGEST_LENGTH);
-        offset += SHA_DIGEST_LENGTH;
+        memcpy(handshake.parts.infohash, torrent.infohash, SHA_DIGEST_LENGTH);
         // 5. peer id (20 bytes) (generate 20 random byte values)
-        memcpy(handshake + offset, "-PC0001-123456789012", 20);
+        strncpy(handshake.parts.peer_id, "-PC0001-123456789012", 20);
 
-        // hex("Handshake Message", handshake, sizeof(handshake));
+        hex("Handshake Message", handshake.raw, sizeof(handshake.raw));
 
         int sockfd;
         struct sockaddr_in server_addr;
@@ -420,38 +443,50 @@ int main(int argc, char* argv[]) {
         }
 
         // Send binary data
-        ssize_t sent_bytes = send(sockfd, handshake, sizeof(handshake), 0);
+        ssize_t sent_bytes = send(sockfd, handshake.raw, sizeof(handshake.raw), 0);
         if(sent_bytes < 0) {
             perror("Failed to send data");
         } else {
-            // printf("Sent %ld bytes of binary data\n", sent_bytes);
+            printf("Sent %ld bytes of binary data\n", sent_bytes);
         }
 
         // Buffer to receive the handshake response
-        unsigned char response[48 + SHA_DIGEST_LENGTH];
-        ssize_t received_bytes = recv(sockfd, response, sizeof(response), 0);
+        Handshake response;
+        ssize_t received_bytes = recv(sockfd, response.raw, sizeof(response.raw), 0);
         if(received_bytes < 0) {
             perror("Failed to receive data");
         } else {
-            // printf("Received %ld bytes of binary data\n", received_bytes);
+            printf("Received %ld bytes of binary data\n", received_bytes);
 
             // Check if we received a complete handshake
-            if(received_bytes == sizeof(response)) {
-                unsigned char peer_id[20];
-                memcpy(peer_id, response + 48, 20);  // peerid starts 48
-
-                hex("Peer ID", peer_id, sizeof(peer_id));  // print peerid
+            if(received_bytes == sizeof(response.raw)) {
+                hex("Peer ID", response.parts.peer_id, sizeof(response.parts.peer_id));  // print peerid
             } else {
                 printf("Received incomplete handshake\n");
             }
         }
-        // hex("Response Message", response, sizeof(response));
+        hex("Response Message", response.raw, sizeof(response.raw));
 
         close(sockfd);
         free(torrent.announce);
         free(torrent.info.name);
         free(torrent.info.pieces);
         free(decoded_str);
+    } else if(strcmp(command, "download_piece") == 0) {
+        char *output_filename, *torrentfile;
+        int pieces_index;
+
+        if(strcmp(argv[2], "-o") == 0) {
+            output_filename = argv[3];
+            torrentfile     = argv[4];
+            pieces_index    = atoi(argv[5]);
+        } else {
+            fprintf(stderr, "brah\n");
+            return 1;
+        }
+
+        printf("%s -- %s -- %d\n", output_filename, torrentfile, pieces_index);
+
     } else {
         fprintf(stderr, "Unknown command: %s\n", command);
         return 1;
