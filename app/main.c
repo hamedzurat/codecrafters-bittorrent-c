@@ -91,6 +91,8 @@ void download_piece(const char* output_file, const TorrentMetadata* torrent, int
 PieceData* init_piece_data(int piece_length);
 void free_piece_data(PieceData* piece);
 bool verify_piece(const unsigned char* piece_data, size_t piece_length, const unsigned char* expected_hash);
+void download_file(const char* output_file, const TorrentMetadata* torrent, const char* peer_addr);
+void write_piece_to_file(FILE* output, const unsigned char* data, size_t length, size_t offset);
 
 void* safe_malloc(size_t size, const char* context) {
     void* ptr = malloc(size);
@@ -499,7 +501,7 @@ void download_piece(const char* output_file, const TorrentMetadata* torrent, int
         piece->received[block] = true;
         free(msg.payload);
     }
-    printf("\n\n");
+    printf("\n");
 
     // Verify piece hash
     if(!verify_piece(piece->data, piece_length,
@@ -548,6 +550,82 @@ bool verify_piece(const unsigned char* piece_data, size_t piece_length, const un
     hex("got", hash, SHA_DIGEST_LENGTH);
 
     return memcmp(hash, expected_hash, SHA_DIGEST_LENGTH) == 0;
+}
+
+void write_piece_to_file(FILE* output, const unsigned char* data, size_t length, size_t offset) {
+    fseek(output, offset, SEEK_SET);
+    if(fwrite(data, 1, length, 0) != length) {
+        perror("Failed to write piece to file");
+        exit(30);
+    }
+}
+
+void download_file(const char* output_file, const TorrentMetadata* torrent, const char* peer_addr) {
+    FILE* output = fopen(output_file, "wb");
+    if(!output) {
+        perror("Failed to open output file");
+        exit(31);
+    }
+
+    // Pre-allocate the file
+    if(fseek(output, torrent->info.length - 1, SEEK_SET) != 0) {
+        perror("Failed to set file size");
+        exit(32);
+    }
+    fputc(0, output);
+
+    // Calculate total number of pieces
+    int total_pieces = (torrent->info.length + torrent->info.piece_length - 1) / torrent->info.piece_length;
+
+    printf("Downloading %d pieces...\n", total_pieces);
+
+    // Download each piece sequentially
+    for(int i = 0; i < total_pieces; i++) {
+        // Calculate piece length (last piece might be shorter)
+        int piece_length = (i == total_pieces - 1) ? (torrent->info.length % torrent->info.piece_length) : torrent->info.piece_length;
+        if(piece_length == 0) piece_length = torrent->info.piece_length;
+
+        printf("Downloading piece %d/%d (length: %d)...\n", i + 1, total_pieces, piece_length);
+
+        // Create temporary file for the piece
+        char temp_file[256];
+        snprintf(temp_file, sizeof(temp_file), "%s.part%d", output_file, i);
+
+        // Download the piece
+        download_piece(temp_file, torrent, i, peer_addr);
+
+        // Read the piece from temporary file
+        FILE* temp = fopen(temp_file, "rb");
+        if(!temp) {
+            perror("Failed to open temporary piece file");
+            exit(33);
+        }
+
+        // Read piece data
+        unsigned char* piece_data = malloc(piece_length);
+        if(fread(piece_data, 1, piece_length, temp) != piece_length) {
+            perror("Failed to read piece data");
+            exit(34);
+        }
+        fclose(temp);
+
+        // Write piece to the correct position in the output file
+        size_t offset = (size_t)i * torrent->info.piece_length;
+        fseek(output, offset, SEEK_SET);
+        if(fwrite(piece_data, 1, piece_length, output) != piece_length) {
+            perror("Failed to write piece to output file");
+            exit(35);
+        }
+
+        // Clean up
+        free(piece_data);
+        remove(temp_file);
+
+        printf("Piece %d/%d complete\n\n", i + 1, total_pieces);
+    }
+
+    fclose(output);
+    printf("Download complete: %s\n", output_file);
 }
 
 int main(int argc, char* argv[]) {
@@ -723,17 +801,50 @@ int main(int argc, char* argv[]) {
 
         char* encoded_str       = read_file(torrent_file);
         TorrentMetadata torrent = decode_torrent(encoded_str);
-        printf("%s\n", torrent.announce);
+        printf("torrent.announce: %s\n", torrent.announce);
 
         TrackerResponse tres = contact_tracker(&torrent);
-        for(size_t i = 0; i < tres.peer_count; i += 6) printf("%s\n", byte_to_ip(tres.peers + i));
         if(tres.peer_count < 6) {
             fprintf(stderr, "No peers available\n");
             return 28;
         }
+        printf("peers: \n");
+        for(size_t i = 0; i < tres.peer_count; i += 6) printf("%s\n", byte_to_ip(tres.peers + i));
 
         unsigned char* peer = byte_to_ip(tres.peers);
         download_piece(output_file, &torrent, piece_index, (char*)peer);
+
+        // Cleanup
+        free(encoded_str);
+        free(torrent.announce);
+        free(torrent.info.name);
+        free(torrent.info.pieces);
+        free(tres.peers);
+    } else if(strcmp(command, "download") == 0) {
+        if(argc < 5 || strcmp(argv[2], "-o") != 0) {
+            fprintf(stderr, "Usage: your_bittorrent.sh download -o <output_file> <torrent_file>\n");
+            return 36;
+        }
+
+        const char* output_file  = argv[3];
+        const char* torrent_file = argv[4];
+
+        // Read and parse the torrent file
+        char* encoded_str       = read_file(torrent_file);
+        TorrentMetadata torrent = decode_torrent(encoded_str);
+        printf("torrent.announce: %s\n", torrent.announce);
+
+        // Get peer list from tracker
+        TrackerResponse tres = contact_tracker(&torrent);
+        if(tres.peer_count < 6) {
+            fprintf(stderr, "No peers available\n");
+            return 37;
+        }
+        for(size_t i = 0; i < tres.peer_count; i += 6) printf("%s\n", byte_to_ip(tres.peers + i));
+
+        // Use the first peer
+        unsigned char* peer = byte_to_ip(tres.peers);
+        download_file(output_file, &torrent, (char*)peer);
 
         // Cleanup
         free(encoded_str);
